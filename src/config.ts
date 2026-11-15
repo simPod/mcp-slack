@@ -25,6 +25,7 @@ const rawEnvSchema = z.object({
   SLACK_MCP_DEFAULT_FORMAT: z.preprocess(emptyToUndefined, z.enum(OUTPUT_FORMATS).default('toon')),
   SLACK_MCP_ALLOWED_HOSTS: optionalList,
   SLACK_MCP_ALLOWED_ORIGINS: optionalList,
+  SLACK_MCP_UPLOAD_ROOT: optionalToken,
 });
 
 /** Fully validated, readonly runtime configuration. */
@@ -37,6 +38,7 @@ export interface Config {
   readonly defaultFormat: OutputFormat;
   readonly allowedHosts: readonly string[];
   readonly allowedOrigins: readonly string[];
+  readonly uploadRoot: string | undefined;
   readonly hasBotToken: boolean;
   readonly hasUserToken: boolean;
 }
@@ -85,6 +87,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultFormat: data.SLACK_MCP_DEFAULT_FORMAT,
     allowedHosts: parseList(data.SLACK_MCP_ALLOWED_HOSTS),
     allowedOrigins: parseList(data.SLACK_MCP_ALLOWED_ORIGINS),
+    uploadRoot: data.SLACK_MCP_UPLOAD_ROOT,
     hasBotToken: data.SLACK_BOT_TOKEN !== undefined,
     hasUserToken: data.SLACK_USER_TOKEN !== undefined,
   });

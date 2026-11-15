@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { realpath } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { FilesUploadV2Arguments } from '@slack/web-api';
 import { registerTool, rawToolResult } from '@/tools/registry.ts';
@@ -19,6 +21,13 @@ interface RawFileInfo {
   permalink?: string;
   url_private?: string;
   url_private_download?: string;
+  channels?: string[];
+  groups?: string[];
+  ims?: string[];
+  shares?: {
+    public?: Record<string, unknown>;
+    private?: Record<string, unknown>;
+  };
 }
 
 interface FileInfoResult {
@@ -33,6 +42,36 @@ const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
  * (e.g. `image/svg+xml`, `image/tiff`) fall back to metadata + a download URL.
  */
 const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** Unknown/private-only sharing is not proof of access to an allowlisted channel. */
+function assertFileAllowed(file: RawFileInfo, channelIds: readonly string[]): void {
+  if (channelIds.length === 0) {
+    return;
+  }
+  const sharedChannels = [
+    ...(file.channels ?? []),
+    ...(file.groups ?? []),
+    ...(file.ims ?? []),
+    ...Object.keys(file.shares?.public ?? {}),
+    ...Object.keys(file.shares?.private ?? {}),
+  ];
+  if (!sharedChannels.some((id) => channelIds.includes(id))) {
+    throw new Error('File is not shared in a configured SLACK_CHANNEL_IDS channel.');
+  }
+}
+
+async function allowedUploadPath(filePath: string, root: string | undefined): Promise<string> {
+  if (root === undefined) {
+    throw new Error('Local file uploads are disabled. Set SLACK_MCP_UPLOAD_ROOT to enable them.');
+  }
+  const canonicalRoot = await realpath(root);
+  const canonicalFile = await realpath(resolve(canonicalRoot, filePath));
+  const fromRoot = relative(canonicalRoot, canonicalFile);
+  if (fromRoot === '..' || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    throw new Error('file_path must be inside SLACK_MCP_UPLOAD_ROOT.');
+  }
+  return canonicalFile;
+}
 
 export function registerFileTools(server: McpServer, deps: ToolDeps): void {
   registerTool(server, deps, {
@@ -60,10 +99,17 @@ export function registerFileTools(server: McpServer, deps: ToolDeps): void {
       if (args.content !== undefined && args.file_path !== undefined) {
         throw new Error('Provide only one of `content` or `file_path`, not both.');
       }
+      if (ctx.slack.channelIds.length > 0 && args.channel_id === undefined) {
+        throw new Error('channel_id is required when SLACK_CHANNEL_IDS is configured.');
+      }
+      const filePath =
+        args.file_path === undefined
+          ? undefined
+          : await allowedUploadPath(args.file_path, ctx.config.uploadRoot);
       const uploadArgs = {
         filename: args.filename,
         ...(args.content !== undefined ? { content: args.content } : {}),
-        ...(args.file_path !== undefined ? { file: args.file_path } : {}),
+        ...(filePath !== undefined ? { file: filePath } : {}),
         ...(args.channel_id !== undefined ? { channel_id: args.channel_id } : {}),
         ...(args.title !== undefined ? { title: args.title } : {}),
         ...(args.initial_comment !== undefined ? { initial_comment: args.initial_comment } : {}),
@@ -104,6 +150,7 @@ export function registerFileTools(server: McpServer, deps: ToolDeps): void {
       if (file === undefined) {
         throw new Error(`File ${args.file_id} not found.`);
       }
+      assertFileAllowed(file, ctx.slack.channelIds);
       const shaped = shapeFile(file);
       const mimetype = file.mimetype ?? '';
       const url = file.url_private_download ?? file.url_private;
