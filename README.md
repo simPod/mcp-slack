@@ -127,7 +127,12 @@ The HTTP transport requires a Bearer token and enables DNS-rebinding protection 
 when bound to a concrete host (loopback or a specific address). For a wildcard bind
 (`--host 0.0.0.0`) no canonical host can be derived, so set `SLACK_MCP_ALLOWED_HOSTS` to the
 public `host:port` value(s) to keep protection on — otherwise it is disabled with a warning
-and only Bearer auth applies. Set `SLACK_MCP_ALLOWED_ORIGINS` for browser-based clients.
+and only Bearer auth applies to native clients. For browser-based clients, set
+`SLACK_MCP_ALLOWED_ORIGINS` to exact origins such as `https://app.example.com`.
+Origin checks apply even on wildcard binds. An unset/empty list permits clients without
+an `Origin` header, but rejects browser origins; wildcard CORS is not supported.
+Allowed browsers receive preflight support and exposed MCP session/protocol headers.
+Preflight does not require a Bearer token, but every actual MCP request still does.
 
 At most 128 concurrent sessions are kept; further `initialize` requests get a 503 until a
 session is closed (`DELETE /mcp`), so an unclosed-session loop cannot exhaust memory.

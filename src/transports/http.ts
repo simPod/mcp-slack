@@ -11,13 +11,23 @@ export interface HttpOptions {
   readonly authToken: string;
   /** Extra `Host` header values to accept (operator-provided, for exposed binds). */
   readonly allowedHosts?: readonly string[];
-  /** `Origin` header values to accept (for browser clients); unset skips the check. */
+  /** Exact browser origins to accept; unset/empty permits only clients without Origin. */
   readonly allowedOrigins?: readonly string[];
   /** Maximum concurrent sessions (default 128). */
   readonly maxSessions?: number;
 }
 
 const SESSION_HEADER = 'mcp-session-id';
+const CORS_METHODS = ['POST', 'GET', 'DELETE', 'OPTIONS'];
+const CORS_HEADERS = [
+  'Authorization',
+  'Content-Type',
+  'MCP-Session-Id',
+  'MCP-Protocol-Version',
+  'Last-Event-ID',
+  'Accept',
+];
+const CORS_HEADER_NAMES = new Set(CORS_HEADERS.map((header) => header.toLowerCase()));
 
 /** Maximum accepted JSON request body (4 MiB) — guards against memory blowups. */
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -52,7 +62,6 @@ function sendJson(
 interface DnsProtection {
   enableDnsRebindingProtection?: boolean;
   allowedHosts?: string[];
-  allowedOrigins?: string[];
 }
 
 /**
@@ -66,7 +75,6 @@ interface DnsProtection {
  */
 function computeDnsProtection(options: HttpOptions): DnsProtection {
   const operatorHosts = options.allowedHosts ?? [];
-  const operatorOrigins = options.allowedOrigins ?? [];
   const isWildcard = WILDCARD_HOSTS.includes(options.host);
 
   if (isWildcard && operatorHosts.length === 0) {
@@ -84,7 +92,6 @@ function computeDnsProtection(options: HttpOptions): DnsProtection {
   return {
     enableDnsRebindingProtection: true,
     allowedHosts: [...hosts],
-    ...(operatorOrigins.length > 0 ? { allowedOrigins: [...operatorOrigins] } : {}),
   };
 }
 
@@ -143,6 +150,7 @@ export async function startHttp(
   options: HttpOptions,
 ): Promise<HttpServer> {
   const transports = new Map<string, StreamableHTTPServerTransport>();
+  const allowedOrigins = new Set(options.allowedOrigins?.filter((origin) => origin !== '*'));
 
   const dnsProtection = computeDnsProtection(options);
   if (dnsProtection.enableDnsRebindingProtection !== true) {
@@ -153,6 +161,19 @@ export async function startHttp(
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Apply CORS before routing/auth so allowed browsers can also read errors.
+    // Origin policy is independent of Host/DNS checks, including wildcard binds.
+    res.setHeader('Vary', 'Origin');
+    const origin = req.headers.origin;
+    if (origin !== undefined) {
+      if (!allowedOrigins.has(origin)) {
+        sendJson(res, 403, { error: 'Origin not allowed' });
+        return;
+      }
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Expose-Headers', 'MCP-Session-Id, MCP-Protocol-Version');
+    }
+
     const pathname = pathnameOf(req);
 
     if (req.method === 'GET' && pathname === '/health') {
@@ -162,6 +183,29 @@ export async function startHttp(
 
     if (pathname !== '/mcp') {
       sendJson(res, 404, { error: 'Not found' });
+      return;
+    }
+
+    if (req.method === 'OPTIONS' && origin !== undefined) {
+      const method = req.headers['access-control-request-method'];
+      const headers = req.headers['access-control-request-headers'];
+      if (
+        typeof method !== 'string' ||
+        !CORS_METHODS.includes(method) ||
+        (headers !== undefined &&
+          (typeof headers !== 'string' ||
+            !headers
+              .split(',')
+              .every((header) => CORS_HEADER_NAMES.has(header.trim().toLowerCase()))))
+      ) {
+        sendJson(res, 403, { error: 'Preflight method or headers not allowed' });
+        return;
+      }
+      res.writeHead(204, {
+        'Access-Control-Allow-Methods': CORS_METHODS.join(', '),
+        'Access-Control-Allow-Headers': CORS_HEADERS.join(', '),
+      });
+      res.end();
       return;
     }
 
