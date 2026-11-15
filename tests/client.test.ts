@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { strict as assert } from 'node:assert';
 import { ErrorCode } from '@slack/web-api';
 import { loadConfig } from '@/config.ts';
 import { SlackApiError, SlackAuthError, SlackClient } from '@/slack/client.ts';
@@ -146,4 +147,68 @@ describe('identity fallback', () => {
     await expect(promise).rejects.toThrow(/provided: chat:write,channels:read/);
     await expect(promise).rejects.toThrow(/reinstall/);
   });
+});
+
+describe('request safety', () => {
+  for (const status of [429, 503]) {
+    test(`does not replay a write after HTTP ${status}`, async () => {
+      let requests = 0;
+      const server = Bun.serve({
+        port: 0,
+        hostname: '127.0.0.1',
+        fetch() {
+          requests++;
+          return new Response('failed', { status, headers: { 'retry-after': '1' } });
+        },
+      });
+      try {
+        const client = withUser();
+        await assert.rejects(
+          client.call('user-preferred', (c) =>
+            c.apiCall(new URL('chat.postMessage', server.url).href, {
+              channel: 'C1',
+              text: 'only once',
+            }),
+          ),
+          (error: unknown) => {
+            assert(error instanceof SlackApiError);
+            if (status === 429) {
+              assert.equal(error.slackError, 'ratelimited');
+              assert.equal(error.retryAfter, 1);
+            }
+            return true;
+          },
+        );
+        assert.equal(requests, 1);
+      } finally {
+        await server.stop(true);
+      }
+    });
+  }
+
+  test('bounds stalled Web API writes to 30 seconds without fallback', async () => {
+    let requests = 0;
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch() {
+        requests++;
+        return new Promise<Response>(() => {});
+      },
+    });
+    try {
+      await assert.rejects(
+        withUser().call('user-preferred', (c) =>
+          c.apiCall(new URL('chat.postMessage', server.url).href, {
+            channel: 'C1',
+            text: 'only once',
+          }),
+        ),
+        /timeout.*30000|30000.*timeout/i,
+      );
+      assert.equal(requests, 1);
+    } finally {
+      await server.stop(true);
+    }
+  }, 35_000);
 });
