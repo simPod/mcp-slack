@@ -198,10 +198,10 @@ export function registerConversationTools(server: McpServer, deps: ToolDeps): vo
     title: 'Get channel history',
     description:
       'Retrieve recent messages from a channel. Set `user` to return only messages from a ' +
-      'single sender: the server pages through history internally until it has gathered at ' +
-      'least `limit` of them (a full final page may return a few more) or the scan cap is hit, ' +
-      'so you avoid fetching a page and filtering it yourself. `nextCursor` resumes the scan ' +
-      'from the next page without dropping or repeating messages.',
+      'single sender: the server pages through history internally until it has gathered ' +
+      '`limit` of them, history is exhausted, or the scan cap is hit. Returns at most `limit` ' +
+      'messages; `truncated` indicates the scan cap was hit. Use `nextCursor` with the same ' +
+      'channel, user, and timestamp bounds to continue, even after an empty filtered page.',
     inputSchema: {
       channel,
       user: z
@@ -246,7 +246,9 @@ export function registerConversationTools(server: McpServer, deps: ToolDeps): vo
       let nextCursor: string | undefined;
       let truncated = false;
       for (let page = 0; page < DEFAULT_MAX_PAGES; page++) {
-        const res = await fetchPage(cursor, HISTORY_MAX);
+        // A page cannot contain more matches than the remaining output budget.
+        // Keep every match so Slack's page cursor never skips same-page overflow.
+        const res = await fetchPage(cursor, limit - matches.length);
         for (const message of (res.messages ?? []).map(shapeMessage)) {
           if (message.user === target) {
             matches.push(message);
@@ -262,9 +264,6 @@ export function registerConversationTools(server: McpServer, deps: ToolDeps): vo
         }
         cursor = nextCursor;
       }
-      // Return every match from the pages we scanned (not sliced to `limit`):
-      // `nextCursor` is a page boundary, so slicing here would strand the
-      // same-page overflow — resuming from it would skip those messages.
       return {
         messages: matches,
         // A cursor remains when we stopped early (limit reached) or hit the cap.
@@ -278,7 +277,9 @@ export function registerConversationTools(server: McpServer, deps: ToolDeps): vo
   registerTool(server, deps, {
     name: 'get_thread_replies',
     title: 'Get thread replies',
-    description: 'Fetch all replies in a message thread.',
+    description:
+      'Fetch one page of replies in a message thread. Use `nextCursor` as `cursor` to fetch ' +
+      'the next page with the same channel and parent timestamp.',
     inputSchema: {
       channel,
       ts: z.string().describe('Timestamp of the parent message.'),

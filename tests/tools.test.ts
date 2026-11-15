@@ -68,15 +68,22 @@ function cannedFor(method: string, args: Record<string, unknown>): unknown {
     };
   }
   if (method === 'conversations.history') {
-    // Two U1 messages share a single page (no next_cursor) so the user-filter
-    // path can be exercised for both correctness and no-slice behavior.
+    // Honor Slack's requested page size so the fixture can verify strict
+    // filtered limits and continuation across nonmatching messages.
+    const messages = [
+      { ts: '12.0', text: 'later', user: 'U1' },
+      { ts: '11.0', text: 'hi', user: 'U2' },
+      { ts: '10.0', text: 'morning', user: 'U1' },
+    ];
+    const offset = Number(args['cursor'] ?? 0);
+    const limit = Number(args['limit'] ?? 100);
+    const page = messages.slice(offset, offset + limit);
+    const next = offset + page.length;
     return {
       ok: true,
-      messages: [
-        { ts: '12.0', text: 'later', user: 'U1' },
-        { ts: '11.0', text: 'hi', user: 'U2' },
-        { ts: '10.0', text: 'morning', user: 'U1' },
-      ],
+      messages: page,
+      has_more: next < messages.length,
+      response_metadata: { next_cursor: next < messages.length ? String(next) : '' },
     };
   }
   if (method === 'users.list') {
@@ -362,22 +369,6 @@ describe('tool behavior', () => {
     });
     const parsed = JSON.parse(textOf(result)) as { messages: { user: string }[] };
     expect(parsed.messages.map((m) => m.user)).toEqual(['U1', 'U1']);
-  });
-
-  test('get_channel_history returns all same-page matches even beyond limit', async () => {
-    const result = await ctx.client.callTool({
-      name: 'get_channel_history',
-      arguments: { channel: 'C1', user: 'U1', limit: 1, format: 'json' },
-    });
-    const parsed = JSON.parse(textOf(result)) as {
-      messages: { user: string }[];
-      nextCursor?: string;
-    };
-    // Slicing to limit=1 would strand the second U1 message on the same page,
-    // while nextCursor points to the next page — so both are returned and the
-    // single (exhausted) page exposes no cursor.
-    expect(parsed.messages.map((m) => m.user)).toEqual(['U1', 'U1']);
-    expect(parsed.nextCursor).toBeUndefined();
   });
 
   test('search_messages folds channel and user into in:/from: operators', async () => {
