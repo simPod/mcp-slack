@@ -255,8 +255,15 @@ describe('tool behavior', () => {
       name: 'search_messages',
       arguments: { query: 'x', format: 'json' },
     });
-    const parsed = JSON.parse(textOf(result)) as { matches: { channel_id: string }[] };
+    const parsed = JSON.parse(textOf(result)) as {
+      matches: { channel_id: string }[];
+      total?: number;
+      page_count?: number;
+    };
     expect(parsed.matches.map((m) => m.channel_id)).toEqual(['C1']);
+    expect(parsed.total).toBeUndefined();
+    expect(parsed.page_count).toBeUndefined();
+    expect(scoped.calls.at(-1)?.args['team_id']).toBe('T1');
     await scoped.client.close();
   });
 

@@ -92,6 +92,7 @@ export function registerSearchTools(server: McpServer, deps: ToolDeps): void {
           ...(args.sort !== undefined ? { sort: args.sort } : {}),
           ...(args.sort_dir !== undefined ? { sort_dir: args.sort_dir } : {}),
           ...(args.page !== undefined ? { page: args.page } : {}),
+          ...(ctx.slack.teamId !== undefined ? { team_id: ctx.slack.teamId } : {}),
         }),
       );
       // Search is workspace-wide, so honor the channel allowlist as a boundary
@@ -103,9 +104,18 @@ export function registerSearchTools(server: McpServer, deps: ToolDeps): void {
         matches = matches.filter((m) => m.channel?.id !== undefined && allowSet.has(m.channel.id));
       }
       return {
-        total: res.messages?.total,
-        page: res.messages?.pagination?.page,
-        page_count: res.messages?.pagination?.page_count,
+        // Slack's totals include disallowed channels, so even an empty result
+        // could reveal that a confidential term exists. Never expose them here.
+        ...(allow.length === 0
+          ? {
+              total: res.messages?.total,
+              page: res.messages?.pagination?.page,
+              page_count: res.messages?.pagination?.page_count,
+            }
+          : {
+              page: args.page ?? 1,
+              note: 'Channel-restricted results; workspace-wide totals are omitted. Pages may be empty.',
+            }),
         matches: matches.map((m) => ({
           ts: m.ts,
           user: m.user ?? m.username,

@@ -93,16 +93,17 @@ missing scope to the Slack app and reinstall it, or configure a token that has i
 
 ## Configuration
 
-| Variable                    | Required        | Description                                                           |
-| --------------------------- | --------------- | --------------------------------------------------------------------- |
-| `SLACK_BOT_TOKEN`           | one of bot/user | Bot token, `xoxb-…`                                                   |
-| `SLACK_USER_TOKEN`          | one of bot/user | User token, `xoxp-…` (edit/delete own, search)                        |
-| `SLACK_TEAM_ID`             | no              | Workspace id, `T…`; scopes listings for org-level tokens              |
-| `SLACK_CHANNEL_IDS`         | no              | Comma-separated channel-ID allowlist (enforced boundary)              |
-| `AUTH_TOKEN`                | no              | Bearer token for HTTP transport (auto-generated if unset)             |
-| `SLACK_MCP_DEFAULT_FORMAT`  | no              | `toon` (default) or `json`                                            |
-| `SLACK_MCP_ALLOWED_HOSTS`   | no              | HTTP: extra `Host` values to accept (enables protection on `0.0.0.0`) |
-| `SLACK_MCP_ALLOWED_ORIGINS` | no              | HTTP: allowed `Origin` values for browser clients                     |
+| Variable                    | Required        | Description                                                             |
+| --------------------------- | --------------- | ----------------------------------------------------------------------- |
+| `SLACK_BOT_TOKEN`           | one of bot/user | Bot token, `xoxb-…`                                                     |
+| `SLACK_USER_TOKEN`          | one of bot/user | User token, `xoxp-…` (edit/delete own, search)                          |
+| `SLACK_TEAM_ID`             | no              | Workspace id, `T…`; scopes listings for org-level tokens                |
+| `SLACK_CHANNEL_IDS`         | no              | Comma-separated channel-ID allowlist (enforced boundary)                |
+| `AUTH_TOKEN`                | no              | Bearer token for HTTP transport (auto-generated if unset)               |
+| `SLACK_MCP_DEFAULT_FORMAT`  | no              | `toon` (default) or `json`                                              |
+| `SLACK_MCP_ALLOWED_HOSTS`   | no              | HTTP: extra `Host` values to accept (enables protection on `0.0.0.0`)   |
+| `SLACK_MCP_ALLOWED_ORIGINS` | no              | HTTP: allowed `Origin` values for browser clients                       |
+| `SLACK_MCP_UPLOAD_ROOT`     | no              | Enable local-path uploads only inside this directory; disabled if unset |
 
 Transport options are passed as CLI flags: `--transport stdio\|http`, `--port <n>`, `--host <h>`.
 
@@ -111,9 +112,13 @@ every channel-scoped tool call must target a channel ID in the list, or it is re
 before reaching Slack. `list_channels`, `search_channels`, `search_messages`,
 and `list_scheduled_messages` return only allowlisted channels. The allowlist matches on
 channel **IDs**, so pass IDs (not names) to channel-scoped tools when it is set.
+`get_file` requires evidence that the file is shared in an allowlisted channel; unknown
+sharing and private-only files are rejected. Uploads must specify an allowlisted `channel_id`.
+Restricted searches omit workspace-wide totals and page counts, which could reveal matches
+outside the allowlist. Result pages may be empty after filtering.
 
 `SLACK_TEAM_ID` is optional and only relevant for org-level (Enterprise Grid) tokens, where
-it scopes workspace-wide listings (`list_channels`, `get_users`) to one team.
+it scopes workspace-wide listings (`list_channels`, `get_users`) and message search to one team.
 
 ### HTTP transport security
 
@@ -126,9 +131,11 @@ and only Bearer auth applies. Set `SLACK_MCP_ALLOWED_ORIGINS` for browser-based 
 At most 128 concurrent sessions are kept; further `initialize` requests get a 503 until a
 session is closed (`DELETE /mcp`), so an unclosed-session loop cannot exhaust memory.
 
-Treat the Bearer token as granting more than Slack access: `upload_file` accepts a
-local `file_path`, so a token holder can have the server read any file the process can read
-and upload it to Slack.
+Local `file_path` uploads are disabled by default. To enable them, set
+`SLACK_MCP_UPLOAD_ROOT` to a dedicated upload directory. Relative paths resolve inside that
+directory, and absolute paths and symlinks must resolve inside it too. Inline `content`
+uploads do not require filesystem access. Keep the upload directory separate from secrets
+and configuration; do not let untrusted processes modify its directory structure.
 
 ## Usage
 
