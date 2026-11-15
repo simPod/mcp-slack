@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { strict as assert } from 'node:assert';
 import { decode } from '@toon-format/toon';
 import {
   defaultLimit,
@@ -60,15 +61,34 @@ describe('shapers', () => {
     expect(shaped.name).toBe('general');
   });
 
-  test('shapeMessage flattens reactions and edited flag', () => {
-    const shaped = shapeMessage({
+  test('rich message content survives JSON and TOON without losing compact metadata', () => {
+    const message = {
       ts: '1.2',
-      text: 'hey',
+      text: '',
+      blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '*Only in blocks*' } }],
+      attachments: [
+        { fallback: 'attachment fallback', fields: [{ title: 'Status', value: 'OK' }] },
+      ],
       reactions: [{ name: 'wave', count: 2 }],
+      files: [{ id: 'F1', mimetype: 'image/png' }],
       edited: { user: 'U1', ts: '1.3' },
-    });
-    expect(shaped.reactions).toBe('wave:2');
-    expect(shaped.edited).toBe(true);
+    };
+    for (const format of ['json', 'toon'] as const) {
+      const encoded = formatResponse({ messages: [shapeMessage(message)] }, format);
+      const decoded: unknown = format === 'json' ? JSON.parse(encoded) : decode(encoded);
+      assert(typeof decoded === 'object' && decoded !== null && 'messages' in decoded);
+      assert(Array.isArray(decoded.messages));
+      const actual: unknown = decoded.messages[0];
+      assert(typeof actual === 'object' && actual !== null);
+      assert('blocks' in actual && 'attachments' in actual);
+      assert.deepEqual(actual.blocks, message.blocks);
+      assert.deepEqual(actual.attachments, message.attachments);
+      assert('reactions' in actual && 'files' in actual && 'text' in actual && 'edited' in actual);
+      assert.equal(actual.reactions, 'wave:2');
+      assert.equal(actual.files, 'F1:image/png');
+      assert.equal(actual.text, '');
+      assert.equal(actual.edited, true);
+    }
   });
 
   test('shapeUser prefers profile fields', () => {

@@ -1,6 +1,6 @@
 /**
- * Shapers convert noisy raw Slack objects into flat, uniform records so TOON's
- * tabular layout applies (a header plus rows) instead of deeply nested blobs.
+ * Shapers keep compact metadata, while retaining rich message content.
+ * Uniform scalar records can use TOON's tabular layout (a header plus rows).
  *
  * Input types are intentionally minimal structural interfaces describing only
  * the fields we read, keeping this layer decoupled from `@slack/web-api`'s large
@@ -53,6 +53,8 @@ interface RawMessage {
   user?: string;
   bot_id?: string;
   text?: string;
+  blocks?: unknown[];
+  attachments?: unknown[];
   ts?: string;
   thread_ts?: string;
   reply_count?: number;
@@ -66,6 +68,8 @@ export interface ShapedMessage {
   user: string | undefined;
   bot_id: string | undefined;
   text: string | undefined;
+  blocks: unknown[] | undefined;
+  attachments: unknown[] | undefined;
   thread_ts: string | undefined;
   reply_count: number | undefined;
   reactions: string | undefined;
@@ -99,6 +103,8 @@ export function shapeMessage(message: RawMessage): ShapedMessage {
     user: message.user,
     bot_id: message.bot_id,
     text: message.text,
+    blocks: message.blocks,
+    attachments: message.attachments,
     thread_ts: message.thread_ts,
     reply_count: message.reply_count,
     reactions: flattenReactions(message.reactions),

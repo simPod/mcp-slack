@@ -1,17 +1,15 @@
 import webApiDefault from '@slack/web-api';
 import * as webApiNamespace from '@slack/web-api';
-import type { WebAPICallResult, WebClient } from '@slack/web-api';
+import type { ErrorCode as SlackErrorCode, WebAPICallResult, WebClient } from '@slack/web-api';
+import type { ReadableStreamDefaultReader } from 'node:stream/web';
 import type { Config } from '@/config.ts';
 
 // Destructure through the default export, falling back to the namespace:
 // @slack/web-api is CommonJS, so named ESM imports of its getter-based
-// re-exports (e.g. `retryPolicies`) break on Node 20's export detection,
+// re-exports (e.g. `ErrorCode`) break on Node 20's export detection,
 // while CJS-bundled interop honors `__esModule` and leaves the default unset.
-const {
-  WebClient: SlackWebClient,
-  retryPolicies,
-  ErrorCode,
-} = (webApiDefault as typeof webApiDefault | undefined) ?? webApiNamespace;
+const { WebClient: SlackWebClient, ErrorCode } =
+  (webApiDefault as typeof webApiDefault | undefined) ?? webApiNamespace;
 
 /**
  * Token-selection policy for a tool.
@@ -51,7 +49,7 @@ export class SlackApiError extends Error {
 }
 
 interface SlackErrorLike {
-  code?: string;
+  code?: SlackErrorCode;
   data?: {
     error?: string;
     needed?: string;
@@ -84,6 +82,9 @@ const IDENTITY_ERRORS: ReadonlySet<string> = new Set([
   'token_revoked',
   'token_expired',
   'ekm_access_denied',
+  // Slack rejected the mutation because this identity does not own the message.
+  'cant_update_message',
+  'cant_delete_message',
 ]);
 
 function isIdentityError(error: SlackApiError): boolean {
@@ -112,7 +113,11 @@ export class SlackClient {
 
   constructor(config: Config) {
     const options = {
-      retryConfig: retryPolicies.fiveRetriesInFiveMinutes,
+      timeout: 30_000,
+      rejectRateLimitedCalls: true,
+      // A transport failure may occur after Slack committed a write. Do not
+      // replay it; only explicit identity refusals in call() permit fallback.
+      retryConfig: { retries: 0 },
     };
     this.bot =
       config.botToken !== undefined ? new SlackWebClient(config.botToken, options) : undefined;
@@ -183,44 +188,98 @@ export class SlackClient {
    * Bearer credential — so this reuses the policy-selected client's token
    * instead of going through the Web API surface (which does not stream files).
    * An identity that may not read the file gets an HTTP 401/403/404, so the
-   * other configured token is tried before giving up.
+   * other configured token is tried before giving up. Each attempt has a
+   * 30-second deadline including body reads; oversized bodies are cancelled.
    */
   async fetchFileBytes(
     policy: TokenPolicy,
     url: string,
+    maxBytes = 5 * 1024 * 1024,
   ): Promise<{ bytes: Uint8Array; contentType: string | undefined }> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+      throw new SlackApiError('File download maxBytes must be a positive safe integer.');
+    }
     const candidates = this.candidatesFor(policy);
     let firstFailure: SlackApiError | undefined;
 
     for (const [index, candidate] of candidates.entries()) {
       const isLast = index === candidates.length - 1;
-      const token = (candidate.client as { token?: string }).token;
+      const token = candidate.client.token;
       if (token === undefined || token === '') {
         throw new SlackAuthError('No token available to download the file.');
       }
-      let res: Response;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => {
+        controller.abort();
+      }, 30_000);
       try {
-        res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-      } catch (error) {
-        throw new SlackApiError(
-          `Failed to download file: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      if (res.ok) {
+        const res = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          void res.body?.cancel().catch(() => undefined);
+          const failure = new SlackApiError(
+            `Failed to download file with the ${candidate.kind} token (HTTP ${res.status}).`,
+          );
+          const retryable = res.status === 401 || res.status === 403 || res.status === 404;
+          if (!retryable || isLast) {
+            throw firstFailure ?? failure;
+          }
+          firstFailure ??= failure;
+          continue;
+        }
+
+        const tooLarge = () =>
+          new SlackApiError(`File download exceeds the max_bytes limit of ${maxBytes} bytes.`);
+        const length = res.headers.get('content-length');
+        if (length !== null && Number(length) > maxBytes) {
+          void res.body?.cancel().catch(() => undefined);
+          throw tooLarge();
+        }
+
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        const reader: ReadableStreamDefaultReader<Uint8Array> | undefined = res.body?.getReader();
+        if (reader !== undefined) {
+          let done = false;
+          try {
+            let chunk = await reader.read();
+            while (!chunk.done) {
+              total += chunk.value.byteLength;
+              if (total > maxBytes) throw tooLarge();
+              chunks.push(chunk.value);
+              chunk = await reader.read();
+            }
+            done = true;
+          } finally {
+            if (!done) void reader.cancel().catch(() => undefined);
+            reader.releaseLock();
+          }
+        }
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
         return {
-          bytes: new Uint8Array(await res.arrayBuffer()),
+          bytes,
           contentType: res.headers.get('content-type') ?? undefined,
         };
+      } catch (error) {
+        if (error instanceof SlackApiError) throw error;
+        // Fetch errors can contain the private URL or credentials. Do not echo
+        // them into a tool result.
+        throw new SlackApiError(
+          controller.signal.aborted
+            ? 'File download timed out after 30 seconds.'
+            : 'Failed to download file.',
+        );
+      } finally {
+        clearTimeout(timeout);
+        controller.abort();
       }
-      const failure = new SlackApiError(
-        `Failed to download file with the ${candidate.kind} token ` +
-          `(HTTP ${res.status} ${res.statusText}).`,
-      );
-      const retryable = res.status === 401 || res.status === 403 || res.status === 404;
-      if (!retryable || isLast) {
-        throw firstFailure ?? failure;
-      }
-      firstFailure ??= failure;
     }
 
     // Unreachable: the loop either returns or throws on its last candidate.
@@ -307,7 +366,10 @@ function normalizeSlackError(error: unknown): SlackApiError | SlackAuthError {
   }
 
   const slackError = err.data?.error;
-  if (slackError !== undefined) {
+  if (
+    slackError !== undefined &&
+    (err.code === undefined || err.code === ErrorCode.PlatformError)
+  ) {
     const details: string[] = [];
     // `missing_scope` carries the exact scopes Slack wanted and the ones the
     // token has. Surfacing them turns an opaque failure into a fix.

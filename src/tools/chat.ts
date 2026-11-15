@@ -5,6 +5,7 @@ import type { ToolDeps } from '@/tools/registry.ts';
 import { resolveLimit, shapeMessage } from '@/format/index.ts';
 
 const channel = z.string().describe('Channel ID (e.g. C0123456789) or name.');
+const messageText = z.string().max(40_000, 'Message text must not exceed 40000 characters.');
 const blocks = z
   .array(z.looseObject({ type: z.string() }))
   .optional()
@@ -20,7 +21,21 @@ interface PostResult {
   ok?: boolean;
   channel?: string;
   ts?: string;
+  text?: string;
   message?: { text?: string };
+  warning?: string;
+  response_metadata?: { warnings?: string[]; messages?: string[] };
+}
+
+function messageResult(res: PostResult) {
+  return {
+    ok: res.ok ?? true,
+    channel: res.channel,
+    ts: res.ts,
+    text: res.message?.text ?? res.text,
+    warning: res.warning,
+    response_metadata: res.response_metadata,
+  };
 }
 
 interface PermalinkResult {
@@ -46,7 +61,7 @@ export function registerChatTools(server: McpServer, deps: ToolDeps): void {
     description: 'Post a new message to a Slack channel.',
     inputSchema: {
       channel,
-      text: z.string().describe('Message text (supports mrkdwn).'),
+      text: messageText.describe('Message text (supports mrkdwn, maximum 40000 characters).'),
       thread_ts: z.string().optional().describe('Reply in this thread if set.'),
       blocks,
     },
@@ -59,7 +74,7 @@ export function registerChatTools(server: McpServer, deps: ToolDeps): void {
           ...(args.blocks !== undefined ? { blocks: args.blocks } : {}),
         }),
       );
-      return { ok: res.ok ?? true, channel: res.channel, ts: res.ts };
+      return messageResult(res);
     },
   });
 
@@ -70,7 +85,7 @@ export function registerChatTools(server: McpServer, deps: ToolDeps): void {
     inputSchema: {
       channel,
       thread_ts: z.string().describe('Timestamp of the parent message.'),
-      text: z.string().describe('Reply text (supports mrkdwn).'),
+      text: messageText.describe('Reply text (supports mrkdwn, maximum 40000 characters).'),
       blocks,
     },
     handler: async (args, ctx) => {
@@ -82,7 +97,7 @@ export function registerChatTools(server: McpServer, deps: ToolDeps): void {
           ...(args.blocks !== undefined ? { blocks: args.blocks } : {}),
         }),
       );
-      return { ok: res.ok ?? true, channel: res.channel, ts: res.ts };
+      return messageResult(res);
     },
   });
 
@@ -95,7 +110,7 @@ export function registerChatTools(server: McpServer, deps: ToolDeps): void {
     inputSchema: {
       channel,
       ts: z.string().describe('Timestamp of the message to update.'),
-      text: z.string().describe('New message text.'),
+      text: messageText.describe('New message text (maximum 40000 characters).'),
       blocks,
     },
     handler: async (args, ctx) => {
@@ -107,7 +122,7 @@ export function registerChatTools(server: McpServer, deps: ToolDeps): void {
           ...(args.blocks !== undefined ? { blocks: args.blocks } : {}),
         }),
       );
-      return { ok: res.ok ?? true, channel: res.channel, ts: res.ts };
+      return messageResult(res);
     },
   });
 
@@ -136,21 +151,19 @@ export function registerChatTools(server: McpServer, deps: ToolDeps): void {
     inputSchema: {
       channel,
       user: z.string().describe('User ID who will see the message.'),
-      text: z.string().describe('Message text.'),
+      text: messageText.describe('Message text (maximum 40000 characters).'),
       thread_ts: z.string().optional().describe('Reply in this thread if set.'),
     },
     handler: async (args, ctx) => {
-      const res = await ctx.slack.call<{ ok?: boolean; message_ts?: string }>(
-        'bot-preferred',
-        (c) =>
-          c.chat.postEphemeral({
-            channel: args.channel,
-            user: args.user,
-            text: args.text,
-            ...(args.thread_ts !== undefined ? { thread_ts: args.thread_ts } : {}),
-          }),
+      const res = await ctx.slack.call<PostResult & { message_ts?: string }>('bot-preferred', (c) =>
+        c.chat.postEphemeral({
+          channel: args.channel,
+          user: args.user,
+          text: args.text,
+          ...(args.thread_ts !== undefined ? { thread_ts: args.thread_ts } : {}),
+        }),
       );
-      return { ok: res.ok ?? true, message_ts: res.message_ts };
+      return { ...messageResult(res), message_ts: res.message_ts };
     },
   });
 
@@ -160,25 +173,25 @@ export function registerChatTools(server: McpServer, deps: ToolDeps): void {
     description: 'Schedule a message to be sent to a channel at a future time.',
     inputSchema: {
       channel,
-      text: z.string().describe('Message text.'),
+      text: messageText.describe('Message text (maximum 40000 characters).'),
       post_at: z.number().int().positive().describe('Unix timestamp (seconds) to send at.'),
       thread_ts: z.string().optional().describe('Reply in this thread if set.'),
     },
     handler: async (args, ctx) => {
-      const res = await ctx.slack.call<{ scheduled_message_id?: string; channel?: string }>(
-        'bot-preferred',
-        (c) =>
-          c.chat.scheduleMessage({
-            channel: args.channel,
-            text: args.text,
-            post_at: args.post_at,
-            ...(args.thread_ts !== undefined ? { thread_ts: args.thread_ts } : {}),
-          }),
+      const res = await ctx.slack.call<
+        PostResult & { scheduled_message_id?: string; post_at?: number }
+      >('bot-preferred', (c) =>
+        c.chat.scheduleMessage({
+          channel: args.channel,
+          text: args.text,
+          post_at: args.post_at,
+          ...(args.thread_ts !== undefined ? { thread_ts: args.thread_ts } : {}),
+        }),
       );
       return {
-        ok: true,
+        ...messageResult(res),
         scheduled_message_id: res.scheduled_message_id,
-        channel: res.channel,
+        post_at: res.post_at,
       };
     },
   });

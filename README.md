@@ -31,7 +31,8 @@ prefers JSON.
 - **TOON-first output** with per-call `format: "toon" | "json"`.
 - **Agent-controlled paging** — `limit` is set per call; TOON gets a higher default.
 - **Two transports** — stdio (default) and Streamable HTTP with Bearer auth.
-- **Resilient** — built-in `Retry-After` (429) handling.
+- **Bounded requests** — finite deadlines and actionable `Retry-After` errors without
+  automatically replaying writes whose outcome is unknown.
 
 ## Install
 
@@ -221,6 +222,18 @@ Sensible defaults keep results focused:
   `include_deleted: true` to include them.
 
 **Messaging (`chat.*`)**
+
+Message reads preserve Block Kit blocks and attachments in both output formats.
+Post, reply, edit, ephemeral, and scheduled-message tools reject text above 40,000 characters.
+Their results retain Slack's returned text and warnings rather than reporting silent truncation
+as an unchanged successful post. Edit/delete operations try the other configured identity only
+after an explicit permission refusal, never after a timeout or uncertain request failure.
+
+Slack API requests have a 30-second per-request timeout. Automatic SDK retries are disabled
+for reads and writes; rate limits return a retry hint instead of holding the call open.
+File downloads have a 30-second deadline per identity attempt and a streaming byte cap
+(5 MiB by default). A caller may explicitly retry a safe read; reconcile uncertain writes
+before sending them again.
 
 | Tool                       | Slack method                     | Token      |
 | -------------------------- | -------------------------------- | ---------- |
