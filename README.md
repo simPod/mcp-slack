@@ -264,7 +264,19 @@ Conversation tools prefer the bot token and fall back to the user token when the
 cannot see the channel — see [Token fallback](#token-fallback).
 
 History and thread messages carry a compact `files` column (`id:mimetype` per
-attachment); pass an id to `get_file` to fetch the bytes.
+attachment); pass an id to `get_file` to fetch the bytes. Supported images return viewable
+image content. Other files return embedded text or binary resources, so clients do not
+need Slack credentials to download a private URL. UTF-8 text files are returned as text;
+other encodings remain byte-preserving binary resources.
+
+`max_bytes` applies to every file type: 5 MiB by default, with a hard maximum of 20 MiB.
+Files known to exceed the requested cap return metadata only. A download that exceeds
+the cap while streaming fails rather than buffering the entire file.
+
+Uploads return the uploaded file IDs from the SDK's completion responses. The multi-step
+upload flow uses the preferred configured identity without switching identities after a
+failure: earlier steps may already have uploaded bytes. Correct that identity's permissions
+and reconcile an uncertain upload before trying again.
 
 **Reactions / Pins / Bookmarks**
 

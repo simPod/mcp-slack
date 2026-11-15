@@ -20,7 +20,7 @@ async function connect(env: NodeJS.ProcessEnv, file: Record<string, unknown> = {
     files: { info: () => Promise.resolve({ ok: true, file: { id: 'F1', ...file } }) },
     filesUploadV2: (args: unknown) => {
       uploads.push(args);
-      return Promise.resolve({ ok: true, files: [{ id: 'F2' }] });
+      return Promise.resolve({ ok: true, files: [{ ok: true, files: [{ id: 'F2' }] }] });
     },
   } as unknown as WebClient;
   slack.call = <T>(
