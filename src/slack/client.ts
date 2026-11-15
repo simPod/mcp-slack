@@ -299,12 +299,15 @@ export class SlackClient {
   async call<T = WebAPICallResult>(
     policy: TokenPolicy,
     fn: (client: WebClient) => Promise<WebAPICallResult>,
+    options: { readonly allowIdentityFallback?: boolean } = {},
   ): Promise<T> {
     const candidates = this.candidatesFor(policy);
     let firstFailure: { kind: TokenKind; error: SlackApiError } | undefined;
 
     for (const [index, candidate] of candidates.entries()) {
-      const isLast = index === candidates.length - 1;
+      // A compound SDK operation may already have created data before its last
+      // step fails. Callers must opt out rather than restart the entire flow.
+      const isLast = index === candidates.length - 1 || options.allowIdentityFallback === false;
       try {
         return (await fn(candidate.client)) as T;
       } catch (error) {

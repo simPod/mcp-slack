@@ -2,15 +2,12 @@ import { z } from 'zod';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { FilesUploadV2Arguments } from '@slack/web-api';
+import type { FilesUploadV2Arguments, WebClient } from '@slack/web-api';
 import { registerTool, rawToolResult } from '@/tools/registry.ts';
 import type { ToolDeps } from '@/tools/registry.ts';
 import { formatResponse, shapeFile } from '@/format/index.ts';
 
-interface UploadResult {
-  files?: Record<string, unknown>[];
-  file?: Record<string, unknown>;
-}
+type UploadResult = Awaited<ReturnType<WebClient['filesUploadV2']>>;
 
 interface RawFileInfo {
   id?: string;
@@ -34,12 +31,13 @@ interface FileInfoResult {
   file?: RawFileInfo;
 }
 
-/** Default cap on bytes inlined as image content, to protect the context. */
+/** Bound all embedded content, including files that are not images. */
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
 
 /**
- * Mimetypes Claude can render as an image content block. Other image types
- * (e.g. `image/svg+xml`, `image/tiff`) fall back to metadata + a download URL.
+ * Mimetypes renderable as an image content block. Other files are embedded
+ * as text or binary resources without exposing Slack credentials.
  */
 const INLINE_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
@@ -115,10 +113,14 @@ export function registerFileTools(server: McpServer, deps: ToolDeps): void {
         ...(args.initial_comment !== undefined ? { initial_comment: args.initial_comment } : {}),
         ...(args.thread_ts !== undefined ? { thread_ts: args.thread_ts } : {}),
       } as FilesUploadV2Arguments;
-      const res = await ctx.slack.call<UploadResult>('bot-preferred', (c) =>
-        c.filesUploadV2(uploadArgs),
+      const res = await ctx.slack.call<UploadResult>(
+        'bot-preferred',
+        (c) => c.filesUploadV2(uploadArgs),
+        // Uploading is a multi-step operation. A final-step refusal is not
+        // evidence that the earlier steps did not already upload the bytes.
+        { allowIdentityFallback: false },
       );
-      const files = res.files ?? (res.file !== undefined ? [res.file] : []);
+      const files = res.files.flatMap((completion) => completion.files ?? []);
       return { ok: true, files: files.map(shapeFile) };
     },
   });
@@ -127,19 +129,19 @@ export function registerFileTools(server: McpServer, deps: ToolDeps): void {
     name: 'get_file',
     title: 'Fetch a file',
     description:
-      "Fetch a Slack file by ID (as listed in a message's `files`). Supported image types " +
-      '(png, jpeg, gif, webp) are downloaded and returned as viewable image content so the ' +
-      'model can see them; other types — and images above `max_bytes` — return metadata plus ' +
-      'an authenticated `download_url`. Requires the `files:read` scope.',
+      "Fetch a Slack file by ID (as listed in a message's `files`). Downloads supported images " +
+      'as viewable image content and other files as embedded text or binary resources. Files ' +
+      'above `max_bytes` return metadata only. Requires the `files:read` scope.',
     inputSchema: {
       file_id: z.string().describe("File ID (e.g. F0123456789), from a message's `files` field."),
       max_bytes: z
         .number()
         .int()
         .positive()
+        .max(MAX_DOWNLOAD_BYTES)
         .optional()
         .describe(
-          `Max bytes to inline as image data; larger files return metadata only. Default ${DEFAULT_MAX_BYTES}.`,
+          `Max bytes to embed; larger files return metadata only. Default ${DEFAULT_MAX_BYTES}, maximum ${MAX_DOWNLOAD_BYTES}.`,
         ),
     },
     handler: async (args, ctx) => {
@@ -158,12 +160,8 @@ export function registerFileTools(server: McpServer, deps: ToolDeps): void {
 
       const metadata = (note: string): unknown => ({ file: shaped, download_url: url, note });
 
-      if (!INLINE_IMAGE_TYPES.has(mimetype) || url === undefined) {
-        return metadata(
-          url === undefined
-            ? 'No download URL available for this file.'
-            : 'Not an inline-viewable image; use download_url to fetch the bytes.',
-        );
+      if (url === undefined) {
+        return metadata('No download URL available for this file.');
       }
       if (file.size !== undefined && file.size > maxBytes) {
         return metadata(
@@ -171,7 +169,7 @@ export function registerFileTools(server: McpServer, deps: ToolDeps): void {
         );
       }
 
-      const { bytes } = await ctx.slack.fetchFileBytes('bot-preferred', url);
+      const { bytes } = await ctx.slack.fetchFileBytes('bot-preferred', url, maxBytes);
       if (bytes.byteLength > maxBytes) {
         return metadata(
           `File size (${bytes.byteLength}B) exceeds max_bytes (${maxBytes}); metadata only.`,
@@ -179,10 +177,30 @@ export function registerFileTools(server: McpServer, deps: ToolDeps): void {
       }
 
       const base64 = Buffer.from(bytes).toString('base64');
-      return rawToolResult([
-        { type: 'text', text: formatResponse({ file: shaped }, ctx.format) },
-        { type: 'image', data: base64, mimeType: mimetype },
-      ]);
+      const summary = { type: 'text' as const, text: formatResponse({ file: shaped }, ctx.format) };
+      if (!INLINE_IMAGE_TYPES.has(mimetype)) {
+        const resource = {
+          uri: `slack://files/${encodeURIComponent(file.id ?? args.file_id)}`,
+          mimeType: mimetype || 'application/octet-stream',
+        };
+        const isText =
+          mimetype.startsWith('text/') ||
+          mimetype === 'application/json' ||
+          mimetype === 'application/xml';
+        if (isText) {
+          try {
+            const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+            return rawToolResult([summary, { type: 'resource', resource: { ...resource, text } }]);
+          } catch {
+            // Preserve non-UTF-8 files byte-for-byte as a binary resource.
+          }
+        }
+        return rawToolResult([
+          summary,
+          { type: 'resource', resource: { ...resource, blob: base64 } },
+        ]);
+      }
+      return rawToolResult([summary, { type: 'image', data: base64, mimeType: mimetype }]);
     },
   });
 }
