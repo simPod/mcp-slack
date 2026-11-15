@@ -215,6 +215,13 @@ optional `limit` (agent-controlled; clamped only to Slack's per-method maximum).
 
 Sensible defaults keep results focused:
 
+Filtered history returns at most `limit` matching messages and scans at most 10 Slack
+pages per call. Pages are sized to the remaining output budget, so sparse filters and
+small limits can reach the scan cap with fewer matches, or none. If `nextCursor` is
+present, continue with the same channel, sender, and timestamp bounds; do not treat an
+empty filtered response as exhausted history. Thread replies also return one page at a
+time and expose `nextCursor` for continuation.
+
 - `list_channels` / `search_channels` return only channels the token identity has
   joined. Pass `include_non_member: true` to include channels it has not joined. (A configured
   `SLACK_CHANNEL_IDS` allowlist is returned as-is — it is already an explicit set.)
